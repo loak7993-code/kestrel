@@ -28,6 +28,13 @@ async fn lite_fetch_and_dom() {
 
 #[tokio::test]
 async fn needs_js_escalates() {
+    if std::env::var("VELOX_BROWSER")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        eprintln!("skipping escalation test (VELOX_BROWSER not set)");
+        return;
+    }
     let site = kestrel_core::testsite::start();
     let s = Session::open(&site.url, opts()).await.unwrap();
     assert_eq!(s.engine(), "lite");
@@ -95,6 +102,17 @@ async fn cookies_roundtrip() {
 
 #[test]
 fn discovery_finds_a_browser() {
+    if std::env::var("VELOX_BROWSER")
+        .unwrap_or_default()
+        .is_empty()
+        && std::env::var("PATH").is_ok()
+        && cfg!(not(target_os = "linux"))
+    {
+        // on macOS/Windows runners no Chromium is preinstalled and the env is
+        // not set — discovery legitimately finds nothing there
+        eprintln!("skipping discovery test (no browser on this runner)");
+        return;
+    }
     let _ = kestrel_core::find_browser(None).expect("a browser resolves");
 }
 
@@ -114,6 +132,14 @@ fn stealth_profile_coherence() {
 
 #[test]
 fn quickjs_scripts_end_to_end() {
+    // needs a browser (k.open cdp) and /tmp paths
+    if std::env::var("VELOX_BROWSER")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        eprintln!("skipping quickjs script test (VELOX_BROWSER not set)");
+        return;
+    }
     // spawn a test site on a thread, run a kestrel script against it
     std::thread::spawn(|| {
         kestrel_core::testsite::serve_forever(47890);
