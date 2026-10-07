@@ -171,6 +171,24 @@ enum Cmd {
         #[arg(long)]
         proxy: Option<String>,
     },
+    /// Capture cookies + web storage to a JSON file
+    SaveSession {
+        url: String,
+        file: String,
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(long)]
+        proxy: Option<String>,
+    },
+    /// Open URL with a saved session restored first
+    LoadSession {
+        url: String,
+        file: String,
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(long)]
+        proxy: Option<String>,
+    },
     /// List Chromium-family browsers found on this machine
     Detect,
     /// (internal) serve the integration-test site
@@ -504,6 +522,42 @@ async fn run_async(cli: Cli) -> Result<()> {
             let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
             let (s, har) = s.har(bodies).await?;
             emit(&serde_json::to_string_pretty(&har)?, &out);
+            s.close().await;
+        }
+        Cmd::SaveSession {
+            url,
+            file,
+            timeout,
+            proxy,
+        } => {
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false))
+                .await?
+                .escalate()
+                .await?;
+            let (s, state) = s.save_session().await?;
+            emit(&serde_json::to_string_pretty(&state)?, &Some(file.clone()));
+            eprintln!("saved → {file}");
+            s.close().await;
+        }
+        Cmd::LoadSession {
+            url,
+            file,
+            timeout,
+            proxy,
+        } => {
+            let raw = std::fs::read_to_string(&file)
+                .map_err(|e| anyhow::Error::msg(format!("read {file}: {e}")))?;
+            let state: serde_json::Value = serde_json::from_str(&raw)?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false))
+                .await?
+                .escalate()
+                .await?;
+            let s = s.load_session(state).await?;
+            if let kestrel_core::Session::Cdp(c) = &s {
+                let _ = c.page.cookies().await?; // session is live with the jar applied
+            }
+            let title = s.title().await.unwrap_or_default();
+            println!("title: {title}");
             s.close().await;
         }
         Cmd::Detect => {

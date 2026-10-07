@@ -267,6 +267,97 @@ impl Session {
         }
     }
 
+    /// Save session state (cookies + localStorage of the current origin).
+    pub async fn save_session(self) -> Result<(Session, serde_json::Value)> {
+        match self {
+            Session::Lite(l) => Ok((
+                Session::Lite(LiteSession {
+                    res: LiteResponse {
+                        url: l.res.url.clone(),
+                        start_url: l.res.start_url.clone(),
+                        status: l.res.status,
+                        headers: l.res.headers.clone(),
+                        set_cookies: l.res.set_cookies.clone(),
+                        body: l.res.body.clone(),
+                        ms: l.res.ms,
+                    },
+                    doc: l.doc,
+                    opts: l.opts.clone(),
+                }),
+                serde_json::json!({ "cookies": [], "origins": [] }),
+            )),
+            Session::Cdp(s) => {
+                let cookies = s.page.cookies().await?;
+                let ls = s.page.local_storage().await?;
+                let origin = url::Url::parse(&s.page.url())
+                    .ok()
+                    .map(|u| format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")))
+                    .unwrap_or_else(|| s.page.url());
+                Ok((
+                    Session::Cdp(s),
+                    serde_json::json!({
+                        "cookies": cookies,
+                        "origins": [{ "origin": origin, "localStorage": ls.iter()
+                            .map(|(k, v)| serde_json::json!({ "name": k, "value": v }))
+                            .collect::<Vec<_>>() }],
+                    }),
+                ))
+            }
+        }
+    }
+
+    /// Restore session state (applies cookies + origins/localStorage).
+    pub async fn load_session(self, state: serde_json::Value) -> Result<Session> {
+        let s = self.escalate_lite().await?;
+        match s {
+            Session::Cdp(s) => {
+                let page = s.page.clone();
+                if let Some(cookies) = state.get("cookies").and_then(serde_json::Value::as_array) {
+                    let list: Vec<Cookie> = cookies
+                        .iter()
+                        .filter_map(|c| {
+                            Some(Cookie {
+                                name: c.get("name")?.as_str()?.to_string(),
+                                value: c
+                                    .get("value")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                domain: c
+                                    .get("domain")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                path: c
+                                    .get("path")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("/")
+                                    .to_string(),
+                                expires: c.get("expires").and_then(serde_json::Value::as_f64),
+                                http_only: c
+                                    .get("httpOnly")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
+                                secure: c
+                                    .get("secure")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
+                                same_site: c
+                                    .get("sameSite")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(String::from),
+                            })
+                        })
+                        .collect();
+                    page.set_cookies(cdp::page::normalize_cookies(list)).await?;
+                }
+                page.apply_storage_state(&state).await?;
+                Ok(Session::Cdp(s))
+            }
+            _ => unreachable!(),
+        }
+    }
+
     pub async fn cookies(&self) -> Result<Vec<Cookie>> {
         match self {
             Session::Lite(_) => Ok(vec![]),

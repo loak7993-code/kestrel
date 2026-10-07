@@ -190,6 +190,126 @@ pub fn install<'js>(
         )?;
     }
 
+    // ── k.fetchAll(urls, opts) — parallel fetch + sequential processing ────
+    // Returns [{ url, status, html, doc }]; `doc` is a parse handle (k.parse).
+    // Network/render runs in parallel on the Rust side; the script iterates
+    // the results on the VM thread (documented model).
+    {
+        // Send+Sync snapshot of the opts only — the session map (non-Sync by
+        // design) must not cross into the pool's parallel futures
+        let state = Arc::clone(&state);
+        let snap: Arc<OpenOpts> = Arc::new(state.opts.open_opts());
+        k.set(
+            "fetchAll",
+            Func::from(
+                move |ctx: Ctx<'js>, urls: Value<'js>, opts: Opt<Value<'js>>| -> Value<'js> {
+                    let state = Arc::clone(&state);
+                    let Some(arr) = urls.as_array() else {
+                        return throw_host(
+                            &ctx,
+                            "fetchAll: urls must be an array of strings".to_string(),
+                        );
+                    };
+                    let url_list: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v: rquickjs::Result<Value<'js>>| {
+                            let v = match v {
+                                Ok(v) => v,
+                                Err(_) => return None,
+                            };
+                            v.as_string().and_then(|s| s.to_string().ok())
+                        })
+                        .collect();
+                    let get_opt = |key: &str| -> Option<Value<'js>> {
+                        opts.0
+                            .as_ref()
+                            .and_then(|o| o.as_object())
+                            .and_then(|o| o.get(key).ok())
+                    };
+                    let concurrency = get_opt("concurrency")
+                        .and_then(|v| v.as_number())
+                        .map(|n| n as usize)
+                        .unwrap_or(8)
+                        .max(1);
+                    let engine = get_opt("engine")
+                        .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()));
+                    let base_urls = url_list.clone();
+                    let jv = state.rt.clone().block_on(fetch_all_pages(
+                        snap.clone(),
+                        url_list,
+                        concurrency,
+                        engine,
+                    ));
+                    match jv {
+                        Ok(pages) => {
+                            let arr = rquickjs::Array::new(ctx.clone());
+                            let arr = match arr {
+                                Ok(a) => a,
+                                Err(e) => return throw_host(&ctx, e.to_string()),
+                            };
+                            for (i, page) in pages.into_iter().enumerate() {
+                                let pobj = Object::new(ctx.clone());
+                                let pobj = match pobj {
+                                    Ok(o) => o,
+                                    Err(e) => return throw_host(&ctx, e.to_string()),
+                                };
+                                if let Some(url) =
+                                    page.get("url").and_then(serde_json::Value::as_str)
+                                {
+                                    let _ = pobj.set("url", url);
+                                }
+                                if let Some(status) =
+                                    page.get("status").and_then(serde_json::Value::as_u64)
+                                {
+                                    let _ = pobj.set("status", status as u32);
+                                }
+                                if let Some(html) =
+                                    page.get("html").and_then(serde_json::Value::as_str)
+                                {
+                                    let _ = pobj.set("html", html);
+                                    if let Err(e) = install_doc(
+                                        &ctx,
+                                        &pobj,
+                                        html,
+                                        base_urls.get(i).map(String::as_str).unwrap_or(""),
+                                    ) {
+                                        return throw_host(&ctx, e.to_string());
+                                    }
+                                }
+                                if let Some(err) =
+                                    page.get("error").and_then(serde_json::Value::as_str)
+                                {
+                                    let _ = pobj.set("error", err);
+                                }
+                                let _ = arr.set(i, pobj.into_value());
+                            }
+                            arr.into_value()
+                        }
+                        Err(e) => throw_host(&ctx, e.to_string()),
+                    }
+                },
+            ),
+        )?;
+    }
+
+    // ── k.parse(html, base) — the DOM primitive over any HTML string ────────
+    k.set(
+        "parse",
+        Func::from(
+            move |ctx: Ctx<'js>, html: String, base: Opt<String>| -> Value<'js> {
+                let base = base.0.unwrap_or_else(|| "http://localhost/".into());
+                let obj = match Object::new(ctx.clone()) {
+                    Ok(o) => o,
+                    Err(e) => return throw_host(&ctx, e.to_string()),
+                };
+                match install_doc(&ctx, &obj, &html, &base) {
+                    Ok(_) => obj.into_value(),
+                    Err(e) => throw_host(&ctx, e.to_string()),
+                }
+            },
+        ),
+    )?;
+
     // ── open / detect / args ────────────────────────────────────────────────
     {
         let st = state.clone();
@@ -771,6 +891,122 @@ fn install_page<'js>(ctx: &Ctx<'js>, st: Shared, id: &str) -> rquickjs::Result<V
             obj.set("human", human.into_value())?;
         }
 
+        // ── introspection: console log, captured requests, response bodies ─────
+        {
+            let st2 = st.clone();
+            let sid2 = sid.clone();
+            obj.set("console", Func::from(move |ctx: Ctx<'js>| -> Value<'js> {
+            let st = st2.clone();
+            let sid = sid2.clone();
+            let rt = st.rt.clone();
+                let out = rt.block_on(async move {
+                let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                let v = match &session {
+                    Session::Cdp(c) => {
+                        let rows = c.page.console().await;
+                        serde_json::json!(rows.iter().map(|m| serde_json::json!({ "type": m.kind, "text": m.text })).collect::<Vec<_>>())
+                    }
+                    _ => serde_json::json!([]),
+                };
+                put_session(&st, &sid, session);
+                anyhow::Ok(v)
+            });
+            finish(&ctx, out)
+        }))?;
+        }
+        {
+            let st2 = st.clone();
+            let sid2 = sid.clone();
+            obj.set(
+                "requests",
+                Func::from(move |ctx: Ctx<'js>, filter: Opt<String>| -> Value<'js> {
+                    let st = st2.clone();
+                    let sid = sid2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let (s, rows) = session.netlog(filter.0.as_deref()).await?;
+                        let v =
+                            serde_json::json!(rows.iter().map(|r| serde_json::json!({
+                    "id": r.id, "url": r.url, "method": r.method,
+                    "status": r.status, "type": r.resource_type, "failed": r.failed,
+                })).collect::<Vec<_>>());
+                        put_session(&st, &sid, s);
+                        anyhow::Ok(v)
+                    });
+                    finish(&ctx, out)
+                }),
+            )?;
+        }
+        {
+            let st2 = st.clone();
+            let sid2 = sid.clone();
+            obj.set(
+                "body",
+                Func::from(move |ctx: Ctx<'js>, id: String| -> Value<'js> {
+                    let st = st2.clone();
+                    let sid = sid2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let v = match &session {
+                            Session::Cdp(c) => c.page.body(&id).await?,
+                            _ => anyhow::bail!("body needs the browser engine"),
+                        };
+                        put_session(&st, &sid, session);
+                        anyhow::Ok(serde_json::json!(v))
+                    });
+                    finish(&ctx, out)
+                }),
+            )?;
+        }
+
+        // ── session save/load (cookies + localStorage, Playwright format) ─────
+        {
+            let st2 = st.clone();
+            let sid2 = sid.clone();
+            obj.set(
+                "saveSession",
+                Func::from(move |ctx: Ctx<'js>| -> Value<'js> {
+                    let st = st2.clone();
+                    let sid = sid2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let (s, state) = session.save_session().await?;
+                        put_session(&st, &sid, s);
+                        anyhow::Ok(state)
+                    });
+                    finish(&ctx, out)
+                }),
+            )?;
+        }
+        {
+            let st2 = st.clone();
+            let sid2 = sid.clone();
+            obj.set(
+                "loadSession",
+                Func::from(move |ctx: Ctx<'js>, state: Value<'js>| -> Value<'js> {
+                    let st = st2.clone();
+                    let sid = sid2.clone();
+                    let Some(jv) = json_of(&ctx, &state) else {
+                        return throw_host(
+                            &ctx,
+                            "loadSession: state must be an object".to_string(),
+                        );
+                    };
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let s = session.load_session(jv).await?;
+                        put_session(&st, &sid, s);
+                        anyhow::Ok(serde_json::json!(true))
+                    });
+                    finish(&ctx, out)
+                }),
+            )?;
+        }
+
         obj.set(
             "close",
             Func::from(move |ctx: Ctx<'js>| -> Value<'js> {
@@ -953,4 +1189,175 @@ fn to_bytes<'js>(ctx: &Ctx<'js>, v: Value<'js>) -> rquickjs::Result<Vec<u8>> {
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+/// Attach the lite-DOM surface to a JS object over an HTML string.
+fn install_doc<'js>(
+    _ctx: &Ctx<'js>,
+    obj: &Object<'js>,
+    html: &str,
+    base: &str,
+) -> rquickjs::Result<()> {
+    let doc = Arc::new(crate::http::html::HtmlDoc::parse(html, base));
+
+    // sync closures are fine here (no await needed)
+    let d1 = doc.clone();
+    obj.set(
+        "text",
+        Func::from(move |ctx: Ctx<'js>| -> Value<'js> {
+            let v = d1.readable();
+            from_json(&ctx, serde_json::json!(v))
+                .unwrap_or_else(|_| Value::new_undefined(ctx.clone()))
+        }),
+    )?;
+    let d2 = doc.clone();
+    obj.set(
+        "select",
+        Func::from(move |ctx: Ctx<'js>, sel: String| -> Value<'js> {
+            let v = d2.text_of(&sel);
+            from_json(&ctx, serde_json::json!(v))
+                .unwrap_or_else(|_| Value::new_undefined(ctx.clone()))
+        }),
+    )?;
+    let d3 = doc.clone();
+    obj.set(
+        "attr",
+        Func::from(
+            move |ctx: Ctx<'js>, sel: String, name: String| -> Value<'js> {
+                let v = d3.attr_of(&sel, &name);
+                from_json(&ctx, serde_json::json!(v))
+                    .unwrap_or_else(|_| Value::new_undefined(ctx.clone()))
+            },
+        ),
+    )?;
+    let d4 = doc.clone();
+    obj.set(
+        "links",
+        Func::from(move |ctx: Ctx<'js>| -> Value<'js> {
+            let links = d4.links();
+            from_json(
+                &ctx,
+                serde_json::json!(
+                    links
+                        .iter()
+                        .map(|l| serde_json::json!({ "text": l.text, "href": l.href }))
+                        .collect::<Vec<_>>()
+                ),
+            )
+            .unwrap_or_else(|_| Value::new_undefined(ctx.clone()))
+        }),
+    )?;
+    let d5 = doc.clone();
+    obj.set(
+        "tables",
+        Func::from(move |ctx: Ctx<'js>| -> Value<'js> {
+            from_json(&ctx, serde_json::json!(d5.tables()))
+                .unwrap_or_else(|_| Value::new_undefined(ctx.clone()))
+        }),
+    )?;
+    let d6 = doc.clone();
+    obj.set(
+        "meta",
+        Func::from(move |ctx: Ctx<'js>| -> Value<'js> {
+            let m = d6.meta();
+            let o = match Object::new(ctx.clone()) {
+                Ok(o) => o,
+                Err(e) => return throw_host(&ctx, e.to_string()),
+            };
+            for (k, v) in m {
+                let _ = o.set(k, v);
+            }
+            o.into_value()
+        }),
+    )?;
+    let d7 = doc.clone();
+    obj.set(
+        "extract",
+        Func::from(move |ctx: Ctx<'js>, sel: String| -> Value<'js> {
+            let rows: Vec<String> = Vec::new(); // placeholder replaced below
+            let _ = rows;
+            // text extraction over all matches: not in HtmlDoc yet — links-style map
+            let texts = d7.extract_texts(&sel);
+            from_json(&ctx, serde_json::json!(texts))
+                .unwrap_or_else(|_| Value::new_undefined(ctx.clone()))
+        }),
+    )?;
+    Ok(())
+}
+
+/// Fetch many pages in parallel (pool for cdp, shared client for lite).
+async fn fetch_all_pages(
+    snap: Arc<OpenOpts>,
+    url_list: Vec<String>,
+    concurrency: usize,
+    engine: Option<String>,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    match engine.as_deref() {
+        Some("cdp") => {
+            let pool = crate::pool::Pool::start(crate::pool::PoolOpts {
+                browsers: (concurrency / 4).max(1),
+                max_concurrency: concurrency,
+                launch: snap.launch_opts(),
+                page: snap.page_opts(None),
+                goto_timeout: snap.timeout,
+            })
+            .await?;
+            let snap_for_map = snap.clone();
+            let pages = pool
+                .map(url_list.clone(), move |url, page| {
+                    let snap_for_map = snap_for_map.clone();
+                    async move {
+                        let nav = page
+                            .goto(
+                                &url,
+                                crate::cdp::page::GotoOpts {
+                                    wait_until: Some(crate::cdp::page::WaitUntil::Interactive),
+                                    timeout: Some(snap_for_map.timeout),
+                                    referer: None,
+                                },
+                            )
+                            .await?;
+                        let html = page.content().await?;
+                        anyhow::Ok(serde_json::json!({
+                            "url": nav.url, "status": nav.status, "html": html,
+                        }))
+                    }
+                })
+                .await?;
+            pool.close().await;
+            Ok(pages)
+        }
+        _ => {
+            // lite: true parallelism via a shared client
+            let client = crate::http::build_client(&snap.lite_opts())?;
+            let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
+            let mut handles = vec![];
+            for url in &url_list {
+                let permit = sem.clone().acquire_owned().await.unwrap();
+                let client = client.clone();
+                let url = url.clone();
+                handles.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    let res = crate::http::fetch(&client, &url, &crate::http::default_opts()).await;
+                    match res {
+                        Ok(r) => anyhow::Ok(serde_json::json!({
+                            "url": r.url, "status": r.status, "html": r.text(),
+                        })),
+                        Err(e) => anyhow::Ok(serde_json::json!({
+                            "url": url, "status": 0, "error": e.to_string(),
+                        })),
+                    }
+                }));
+            }
+            let mut pages = vec![];
+            for h in handles {
+                if let Ok(r) = h.await
+                    && let Ok(j) = r
+                {
+                    pages.push(j);
+                }
+            }
+            Ok(pages)
+        }
+    }
 }

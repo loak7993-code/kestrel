@@ -209,6 +209,15 @@ impl HtmlDoc {
         out
     }
 
+    /// Text content of every match of `sel` (batch extraction for scripts).
+    pub fn extract_texts(&self, sel: &str) -> Vec<String> {
+        let doc = &self.html;
+        let Ok(css_sel) = Selector::parse(&css(sel)) else {
+            return vec![];
+        };
+        doc.select(&css_sel).map(text_content).collect()
+    }
+
     pub fn jsonld(&self) -> Vec<serde_json::Value> {
         let doc = &self.html;
         Selector::parse("script[type=\"application/ld+json\"]")

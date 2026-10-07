@@ -71,6 +71,25 @@ Cookie carry-over is real: a lite `k.fetch` sees `set-cookie` headers, and the
 escalated browser session starts with that jar applied before its first
 navigation.
 
+**Parallel fetching** — the network runs in parallel (pool for cdp, shared
+keep-alive client for lite), the script processes results sequentially:
+
+```js
+const pages = k.fetchAll(urls, { concurrency: 8, engine: "lite" });
+for (const p of pages) {
+  k.log(p.status, p.url, "| h1:", p.select("h1"), "| links:", p.links().length);
+}
+
+// any HTML string, parsed locally — no browser, no round-trip
+const doc = k.parse(html, base);
+doc.select("h1"); doc.links(); doc.tables(); doc.extract("li");
+```
+
+Page introspection is scriptable too: `page.console()`, `page.requests(/filter/)`,
+`page.body(requestId)`, `page.saveSession()` / `page.loadSession(state)`
+(cookies + localStorage, Playwright format — the CLI `save-session`/
+`load-session` commands ride the same path).
+
 ## CLI
 
 ```bash
