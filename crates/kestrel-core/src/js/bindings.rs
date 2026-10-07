@@ -31,6 +31,7 @@ pub struct GlobalOpts {
     pub proxy: Option<String>,
     pub stealth: bool,
     pub profile: Option<String>,
+    pub retries: Option<u32>,
 }
 
 impl GlobalOpts {
@@ -47,6 +48,7 @@ impl GlobalOpts {
             locale: None,
             timezone: None,
             block_urls: vec![],
+            retries: self.retries,
             stealth: if self.stealth {
                 Some(StealthOpts {
                     profile: self.profile.clone(),

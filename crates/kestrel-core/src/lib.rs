@@ -11,7 +11,7 @@ pub mod needs_js;
 pub mod pool;
 pub mod testsite;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use cdp::browser::Browser;
 use cdp::page::Page;
 use http::html::HtmlDoc;
@@ -37,6 +37,8 @@ pub struct OpenOpts {
     pub locale: Option<String>,
     pub timezone: Option<String>,
     pub block_urls: Vec<String>,
+    /// Session-level retries for transient failures (velox.open semantics)
+    pub retries: Option<u32>,
     pub stealth: Option<cdp::stealth::StealthOpts>,
     pub dialog_action: Option<cdp::page::DialogAction>,
 }
@@ -98,18 +100,45 @@ pub struct CdpSession {
 
 impl Session {
     /// Open a URL. engine: auto → lite first, escalate when the page needs JS
-    /// (cookie state carries over).
+    /// (cookie state carries over). `opts.retries` retries TRANSIENT failures
+    /// (timeouts, resets, 5xx) with linear backoff.
     pub async fn open(url: &str, opts: OpenOpts) -> Result<Session> {
+        let tries = (opts.retries.unwrap_or(0) as usize) + 1;
+        let retryable = |e: &anyhow::Error| {
+            static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r"(?i)timeout|ERR_|ECONN|reset|502|503|504|closed|Tunnel|SSL")
+                    .unwrap()
+            });
+            RE.is_match(&e.to_string())
+        };
+        let mut last: Option<anyhow::Error> = None;
+        for attempt in 1..=tries {
+            match Self::open_once(url, &opts).await {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    last = Some(e);
+                    if attempt < tries && retryable(last.as_ref().unwrap()) {
+                        tokio::time::sleep(Duration::from_millis(300 * attempt as u64)).await;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow!("open failed")))
+    }
+
+    async fn open_once(url: &str, opts: &OpenOpts) -> Result<Session> {
         let engine = opts.engine.clone().unwrap_or_else(|| "auto".to_string());
         match engine.as_str() {
-            "lite" => Ok(Session::Lite(LiteSession::fetch(url, opts).await?)),
-            "cdp" => Ok(Session::Cdp(CdpSession::goto(url, opts).await?)),
+            "lite" => Ok(Session::Lite(LiteSession::fetch(url, opts.clone()).await?)),
+            "cdp" => Ok(Session::Cdp(CdpSession::goto(url, opts.clone()).await?)),
             _ => {
                 let lite = LiteSession::fetch(url, opts.clone()).await?;
                 let server = lite.res.header("server").map(|s| s.to_string());
                 let cf = lite.res.headers.keys().any(|k| k == "cf-mitigated");
                 if needs_js::needs_js(lite.res.status, server.as_deref(), cf, &lite.res.text()) {
-                    let cdp = CdpSession::goto_with_jar(url, opts, Some(&lite)).await?;
+                    let cdp = CdpSession::goto_with_jar(url, opts.clone(), Some(&lite)).await?;
                     Ok(Session::Cdp(cdp))
                 } else {
                     Ok(Session::Lite(lite))

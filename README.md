@@ -93,14 +93,17 @@ Page introspection is scriptable too: `page.console()`, `page.requests(/filter/)
 
 The CLI's `--engine auto|lite|cdp` flag is live on every open-based command
 (it was silently ignored in the first cut — caught by profiling `open --engine
-cdp` at 21 ms, which is a lite-engine time, not a browser one).
+cdp` at 21 ms, which is a lite-engine time, not a browser one). `--retries N`
+retries transient failures (timeouts, resets, 5xx) with linear backoff at the
+session level — the same semantics as `gotoWithRetry` but around the whole
+open.
 
 ## CLI
 
 ```bash
 ksl run script.js -- k=v …    # scripts (embedded QuickJS)
 ksl repl                      # interactive, same k API
-ksl open URL [--json|--html|--sel] [-o FILE] [--stealth] [--engine auto|lite|cdp]
+ksl open URL [--json|--html|--sel] [-o FILE] [--stealth] [--engine auto|lite|cdp] [--retries N]
 ksl shot URL [--full|--sel]   |  ksl pdf URL [--format A4] [--landscape]
 ksl links/scrape/eval/cookies/challenge/net/har URL …
 ksl bench URL                 # lite vs browser timings, in-process
