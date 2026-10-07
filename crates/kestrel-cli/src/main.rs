@@ -202,14 +202,22 @@ enum Cmd {
     },
 }
 
-fn opts(timeout: Option<u64>, proxy: Option<String>, stealth: bool) -> kestrel_core::OpenOpts {
+fn opts(
+    timeout: Option<u64>,
+    proxy: Option<String>,
+    stealth: bool,
+    engine: Option<&str>,
+) -> kestrel_core::OpenOpts {
     kestrel_core::OpenOpts {
         timeout: std::time::Duration::from_millis(timeout.unwrap_or(20000)),
         proxy,
+        engine: engine.map(String::from),
         stealth: stealth.then(kestrel_core::cdp::stealth::StealthOpts::default),
         ..Default::default()
     }
 }
+
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn emit(text: &str, out: &Option<String>) {
     match out {
@@ -219,7 +227,9 @@ fn emit(text: &str, out: &Option<String>) {
                 let _ = std::fs::create_dir_all(dir);
             }
             std::fs::write(path, text).expect("write out");
-            eprintln!("→ {path}  {:.1} KB", text.len() as f64 / 1024.0);
+            if !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("→ {path}  {:.1} KB", text.len() as f64 / 1024.0);
+            }
         }
     }
 }
@@ -309,16 +319,19 @@ async fn run_async(cli: Cli) -> Result<()> {
             json,
             html,
             sel,
-            engine: _,
+            engine,
             timeout,
             proxy,
             stealth,
             out,
-            quiet: _,
+            quiet,
             profile,
         } => {
+            QUIET.store(quiet, std::sync::atomic::Ordering::Relaxed);
             let t0 = Instant::now();
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, stealth)).await?;
+            let s =
+                kestrel_core::Session::open(&url, opts(timeout, proxy, stealth, engine.as_deref()))
+                    .await?;
             if profile {
                 eprintln!("[profile] open: {}ms", t0.elapsed().as_millis());
             }
@@ -352,7 +365,7 @@ async fn run_async(cli: Cli) -> Result<()> {
         } => {
             let out = out.unwrap_or_else(|| "shot.png".to_string());
             let t0 = Instant::now();
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None)).await?;
             let (s, png) = match &sel {
                 Some(sel) => s.element_shot(sel).await?,
                 None => s.screenshot(full).await?,
@@ -373,7 +386,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             proxy,
         } => {
             let out = out.unwrap_or_else(|| "page.pdf".to_string());
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None)).await?;
             let (s, pdf) = s.pdf(format.as_deref(), landscape).await?;
             std::fs::write(&out, &pdf)?;
             println!("{out}  {:.1} KB", pdf.len() as f64 / 1024.0);
@@ -385,7 +398,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             timeout,
             proxy,
         } => {
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None)).await?;
             let links = s.links().await?;
             if json {
                 println!(
@@ -415,7 +428,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             timeout,
             proxy,
         } => {
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None)).await?;
             let data = match recipe.as_str() {
                 "text" => serde_json::json!(s.readable().await?),
                 "links" => serde_json::json!(s.links().await?),
@@ -442,7 +455,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             timeout,
             proxy,
         } => {
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None)).await?;
             let (s, v) = s.eval(&expr).await?;
             println!(
                 "{}",
@@ -458,7 +471,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             timeout,
             proxy,
         } => {
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None)).await?;
             let cookies = s.cookies().await?;
             println!("{}", serde_json::to_string_pretty(&cookies)?);
             s.close().await;
@@ -471,7 +484,8 @@ async fn run_async(cli: Cli) -> Result<()> {
             proxy,
         } => {
             let s =
-                kestrel_core::Session::open(&url, opts(timeout_nav(timeout), proxy, false)).await?;
+                kestrel_core::Session::open(&url, opts(timeout_nav(timeout), proxy, false, None))
+                    .await?;
             if engage {
                 let (s, res) = s
                     .engage_challenge(std::time::Duration::from_millis(timeout), true)
@@ -493,7 +507,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             timeout,
             proxy,
         } => {
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None)).await?;
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             let (s, rows) = s.netlog(filter.as_deref()).await?;
             if json {
@@ -519,7 +533,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             timeout,
             proxy,
         } => {
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false)).await?;
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None)).await?;
             let (s, har) = s.har(bodies).await?;
             emit(&serde_json::to_string_pretty(&har)?, &out);
             s.close().await;
@@ -530,7 +544,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             timeout,
             proxy,
         } => {
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false))
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None))
                 .await?
                 .escalate()
                 .await?;
@@ -548,7 +562,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             let raw = std::fs::read_to_string(&file)
                 .map_err(|e| anyhow::Error::msg(format!("read {file}: {e}")))?;
             let state: serde_json::Value = serde_json::from_str(&raw)?;
-            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false))
+            let s = kestrel_core::Session::open(&url, opts(timeout, proxy, false, None))
                 .await?
                 .escalate()
                 .await?;
@@ -579,7 +593,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             let mut lite = vec![];
             for _ in 0..iters {
                 let t0 = Instant::now();
-                let s = kestrel_core::Session::open(&url, opts(None, None, false)).await?;
+                let s = kestrel_core::Session::open(&url, opts(None, None, false, None)).await?;
                 let _ = s.readable().await?;
                 lite.push(t0.elapsed().as_millis());
                 s.close().await;
@@ -587,7 +601,7 @@ async fn run_async(cli: Cli) -> Result<()> {
             let mut cdp = vec![];
             for _ in 0..iters {
                 let t0 = Instant::now();
-                let s = kestrel_core::Session::open(&url, opts(None, None, false))
+                let s = kestrel_core::Session::open(&url, opts(None, None, false, None))
                     .await?
                     .escalate()
                     .await?;

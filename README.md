@@ -41,6 +41,7 @@ const shot = page.screenshot({ full: true });
 k.save("page.png", shot);
 
 const nav = page.goto(page.url() + "/page2");          // { url, status, ms }
+const retry = page.gotoWithRetry(page.url() + "/flaky", 3);  // backoff retry; { attempts: [...] }
 const tok = page.waitForCaptchaToken(null, 60000);     // diagnoses on timeout
 const challenge = page.detectChallenge({ wait: true });
 
@@ -90,12 +91,16 @@ Page introspection is scriptable too: `page.console()`, `page.requests(/filter/)
 (cookies + localStorage, Playwright format — the CLI `save-session`/
 `load-session` commands ride the same path).
 
+The CLI's `--engine auto|lite|cdp` flag is live on every open-based command
+(it was silently ignored in the first cut — caught by profiling `open --engine
+cdp` at 21 ms, which is a lite-engine time, not a browser one).
+
 ## CLI
 
 ```bash
 ksl run script.js -- k=v …    # scripts (embedded QuickJS)
 ksl repl                      # interactive, same k API
-ksl open URL [--json|--html|--sel] [-o FILE] [--stealth]
+ksl open URL [--json|--html|--sel] [-o FILE] [--stealth] [--engine auto|lite|cdp]
 ksl shot URL [--full|--sel]   |  ksl pdf URL [--format A4] [--landscape]
 ksl links/scrape/eval/cookies/challenge/net/har URL …
 ksl bench URL                 # lite vs browser timings, in-process

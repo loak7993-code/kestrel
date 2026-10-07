@@ -961,6 +961,30 @@ fn install_page<'js>(ctx: &Ctx<'js>, st: Shared, id: &str) -> rquickjs::Result<V
             )?;
         }
 
+        // ── goto with backoff retry — flaky proxies are the normal case ────────
+        {
+            let st2 = st.clone();
+            let sid2 = sid.clone();
+            obj.set("gotoWithRetry", Func::from(move |ctx: Ctx<'js>, url: String, retries: Opt<f64>| -> Value<'js> {
+            let st = st2.clone();
+            let sid = sid2.clone();
+            let rt = st.rt.clone();
+            let out: anyhow::Result<serde_json::Value> = rt.block_on(async move {
+                let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                let s = session.escalate_lite().await?;
+                match s {
+                    Session::Cdp(c) => {
+                        let nav = c.page.goto_with_retry(&url, retries.0.unwrap_or(3.0) as usize, Duration::from_millis(st.opts.timeout_ms.unwrap_or(45000))).await?;
+                        put_session(&st, &sid, Session::Cdp(c));
+                        anyhow::Ok(serde_json::json!({ "url": nav.url, "status": nav.status, "ms": nav.ms, "attempts": nav.attempts }))
+                    }
+                    _ => anyhow::bail!("gotoWithRetry needs the browser engine"),
+                }
+            });
+            finish(&ctx, out)
+        }))?;
+        }
+
         // ── session save/load (cookies + localStorage, Playwright format) ─────
         {
             let st2 = st.clone();
