@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install chrome-headless-shell
+        run: |
+          curl -sL https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json -o /tmp/cf.json
+          URL=$(python3 -c "import json; d=json.load(open('/tmp/cf.json')); print([x['url'] for x in d['channels']['Stable']['downloads']['chrome-headless-shell'] if x['platform']=='linux64'][0])")
+          curl -sL -o /tmp/hs.zip "$URL"
+          python3 -m zipfile -e /tmp/hs.zip "$HOME/.browsers"
+          chmod +x "$HOME/.browsers/chrome-headless-shell-linux64/chrome-headless-shell"
+          echo "VELOX_BROWSER=$HOME/.browsers/chrome-headless-shell-linux64/chrome-headless-shell" >> "$GITHUB_ENV"
+          echo "VELOX_NO_SANDBOX=1" >> "$GITHUB_ENV"
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --release -- -D warnings
+
+      - name: cargo test
+        run: cargo test --release
+
+      - name: CLI smoke
+        run: |
+          cargo build --release
+          ./target/release/ksl detect
+          ./target/release/ksl open https://example.com | head -3
+
+  windows-macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build
+        run: cargo build --release
+      - name: cargo test (no browser — unit + site tests only)
+        run: cargo test --release -- --skip cdp --skip cookies_roundtrip

@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/kestrel-core", "crates/kestrel-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["loak7993"]
+repository = "https://github.com/loak7993-code/kestrel"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

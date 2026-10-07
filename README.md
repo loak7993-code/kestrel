@@ -1,0 +1,124 @@
+# kestrel
+
+Browser automation at native speed. A Rust framework with the browser engine
+(CDP), a pure-HTTP engine, coherent stealth profiles, human-like input,
+challenge/captcha detection — and an **embedded QuickJS runtime**, so scripts
+program against a `k` API with no Node, no Python, no external runtime.
+
+```bash
+cargo install --path .          # or grab a release binary
+ksl run scrape.js               # scripts
+ksl open https://example.com    # sugar commands, same output as the JS tools
+```
+
+## Why
+
+Three lessons from running velox (JS) and velox-rs (Rust port) against real
+targets, baked in from line one:
+
+1. **Startup dominates.** A native binary starts in ~2 ms where a Node CLI
+   pays ~100 ms before its first CDP message. Every defect that ever made the
+   JS tool slow (spawn-heavy discovery, race timers holding the process open,
+   double engine injection) is structurally absent here.
+2. **The in-page logic is JavaScript regardless.** Selectors, waits, stealth
+   patches execute inside Chrome as JS. kestrel ships its own compact in-page
+   engine (`__ks`) and its own coherent stealth patch set — authored here, not
+   extracted from anywhere.
+3. **Extensibility needs closures, and closures need a scripting VM.** A pure
+   Rust framework can't take user callbacks. QuickJS is embedded instead:
+   scripts get a real language; the host stays native; nothing else to install.
+
+## The `k` API
+
+```js
+// scrape.js — host calls BLOCK the script: sequential automation reads
+// exactly like it runs. (Promise.all over host calls serialises — the VM
+// is single-threaded; that is deliberate.)
+const page = k.open(k.args.site, { engine: "cdp" });   // auto|lite|cdp
+k.log("title:", page.title());
+const rows = page.extract(".story", { attrs: ["href", "data-id"] });
+const shot = page.screenshot({ full: true });
+k.save("page.png", shot);
+
+const nav = page.goto(page.url() + "/page2");          // { url, status, ms }
+const tok = page.waitForCaptchaToken(null, 60000);     // diagnoses on timeout
+const challenge = page.detectChallenge({ wait: true });
+
+page.close();
+```
+
+```js
+// hybrid: pure HTTP first, browser only when JS is needed
+const res = k.fetch(url);            // keep-alive, gzip/brotli, cookie jar
+if (k.needsJS(res)) {
+  const page = k.open(url);          // escalates, cookies carry over
+}
+```
+
+Full surface: `k.open/fetch/save/load/log/env/args/detect/exit`,
+page `title/url/goto/html/readable/text/extract/count/eval/wait/screenshot/
+pdf/cookies/close`, human input (`page.human.move/click/type/warmup/hold`),
+challenge helpers, pool (`k.Pool` via Rust; scripting uses sequential pages).
+
+## CLI
+
+```bash
+ksl run script.js -- k=v …    # scripts (embedded QuickJS)
+ksl repl                      # interactive, same k API
+ksl open URL [--json|--html|--sel] [-o FILE] [--stealth]
+ksl shot URL [--full|--sel]   |  ksl pdf URL [--format A4] [--landscape]
+ksl links/scrape/eval/cookies/challenge/net/har URL …
+ksl bench URL                 # lite vs browser timings, in-process
+ksl detect                    # browsers found on this machine
+```
+
+`--profile` on `open`/`shot` prints per-phase timings.
+
+## Architecture
+
+```
+crates/kestrel-core/
+  cdp/transport.rs    one WebSocket per target; writer+reader tasks; id-
+                      correlated requests; broadcast event bus
+  cdp/browser.rs      launch (stderr ws-url capture) / connect; /json/new?url=
+                      fast path (chrome starts loading during boot)
+  cdp/page.rs         goto with lifecycle waits (late-attach safe), bare-call
+                      eval with self-heal, extraction via the in-page engine,
+                      screenshots (clip), PDFs, cookies (dot-domain fix),
+                      network capture + HAR
+  cdp/stealth.rs      3 coherent profiles + 15 geo presets + UA-CH alignment
+                      with the real binary; deterministic seeded noise
+  cdp/challenge.rs    turnstile/recaptcha/hcaptcha/arkose/awswaf/px detection,
+                      window-object authoritative signals, {wait} mode
+  human.rs            seeded bezier mouse, jitter typing, warmup, press-hold
+  http/               reqwest engine + scraper DOM + readability
+  needs_js.rs         escalation heuristics
+  pool.rs             N browsers × bounded concurrency
+  js/                 QuickJS runtime, k-API bindings, REPL support
+crates/kestrel-cli/   ksl binary
+tests/                integration tests against the built-in Rust test site
+```
+
+## Test
+
+```bash
+cargo test --release                        # unit + integration (no browser)
+VELOX_BROWSER=/path/to/chrome cargo test    # + CDP tests
+```
+
+## Status (honest gaps)
+
+Shipped: dual engine (auto/lite/cdp + escalation), navigation with lifecycle
+waits and the boot-load fast path, in-page engine (`css/id=/tag=/text=`,
+shadow-`wait`, `waitExpr`), extraction, eval, screenshots (viewport/full/
+element), PDFs, cookies, human input, stealth profiles, challenge detection +
+token waiting, network capture + HAR, pool, CLI + scripts + REPL.
+
+Not in v1: challenge *engage* (interactive solving), drag&drop/file upload/
+workers/screencast video/virtual clock, proxy auth forwarder, accounts/
+identity tooling, plugin loader for scripts (host closures are Rust-side for
+now). The framework is standalone — it shares no code with velox; where the
+two overlap, the semantics were written fresh (stealth profiles, in-page
+engine) or ported with the same lessons applied (transport, discovery).
+
+MIT.
