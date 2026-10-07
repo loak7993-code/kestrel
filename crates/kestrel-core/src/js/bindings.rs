@@ -378,6 +378,34 @@ fn install_page<'js>(ctx: &Ctx<'js>, st: Shared, id: &str) -> rquickjs::Result<V
         let st2 = st.clone();
         let sid2 = sid.clone();
         obj.set(
+            "clickAt",
+            Func::from(move |ctx: Ctx<'js>, x: f64, y: f64| -> Value<'js> {
+                let st = st2.clone();
+                let sid = sid2.clone();
+                let out = st
+                    .rt
+                    .block_on((|st: Shared, sid: String, x: f64, y: f64| async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let s = session.escalate_lite().await?;
+                        let r = match s {
+                            Session::Cdp(c) => {
+                                c.page.human().click_at(x, y).await?;
+                                put_session(&st, &sid, Session::Cdp(c));
+                                serde_json::json!(true)
+                            }
+                            _ => anyhow::bail!("clickAt needs the browser engine"),
+                        };
+                        anyhow::Ok(r)
+                    })(st.clone(), sid.clone(), x, y));
+                finish(&ctx, out)
+            }),
+        )?;
+    }
+
+    {
+        let st2 = st.clone();
+        let sid2 = sid.clone();
+        obj.set(
             "text",
             Func::from(move |ctx: Ctx<'js>, sel: String| -> Value<'js> {
                 let st = st2.clone();
@@ -578,6 +606,171 @@ fn install_page<'js>(ctx: &Ctx<'js>, st: Shared, id: &str) -> rquickjs::Result<V
     {
         let st2 = st.clone();
         let sid2 = sid.clone();
+        // ── human input (seeded bezier moves, jitter typing, tremor holds) ─────
+        {
+            let h_st = st.clone();
+            let h_sid = sid.clone();
+            let human = Object::new(ctx.clone())?;
+
+            macro_rules! hset {
+                ($name:expr, $closure:expr) => {
+                    human.set($name, Func::from($closure))?;
+                };
+            }
+
+            // move(x, y)
+            {
+                let hs = h_st.clone();
+                let hs2 = h_sid.clone();
+                hset!("move", move |ctx: Ctx<'js>, x: f64, y: f64| -> Value<'js> {
+                    let st = hs.clone();
+                    let sid = hs2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let s = session.escalate_lite().await?;
+                        match s {
+                            Session::Cdp(c) => {
+                                c.page.human().move_to(x, y).await?;
+                                put_session(&st, &sid, Session::Cdp(c));
+                                anyhow::Ok(serde_json::json!(true))
+                            }
+                            _ => anyhow::bail!("human input needs the browser engine"),
+                        }
+                    });
+                    finish(&ctx, out)
+                });
+            }
+            // click(sel)
+            {
+                let hs = h_st.clone();
+                let hs2 = h_sid.clone();
+                hset!("click", move |ctx: Ctx<'js>, sel: String| -> Value<'js> {
+                    let st = hs.clone();
+                    let sid = hs2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let s = session.escalate_lite().await?;
+                        match s {
+                            Session::Cdp(c) => {
+                                c.page.human().click(&sel).await?;
+                                put_session(&st, &sid, Session::Cdp(c));
+                                anyhow::Ok(serde_json::json!(true))
+                            }
+                            _ => anyhow::bail!("human input needs the browser engine"),
+                        }
+                    });
+                    finish(&ctx, out)
+                });
+            }
+            // type(sel, text)
+            {
+                let hs = h_st.clone();
+                let hs2 = h_sid.clone();
+                hset!("type", move |ctx: Ctx<'js>,
+                                    sel: String,
+                                    text: String|
+                      -> Value<'js> {
+                    let st = hs.clone();
+                    let sid = hs2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let s = session.escalate_lite().await?;
+                        match s {
+                            Session::Cdp(c) => {
+                                c.page.human().type_text(&sel, &text).await?;
+                                put_session(&st, &sid, Session::Cdp(c));
+                                anyhow::Ok(serde_json::json!(true))
+                            }
+                            _ => anyhow::bail!("human input needs the browser engine"),
+                        }
+                    });
+                    finish(&ctx, out)
+                });
+            }
+            // scroll(by, read)
+            {
+                let hs = h_st.clone();
+                let hs2 = h_sid.clone();
+                hset!("scroll", move |ctx: Ctx<'js>,
+                                      by: i64,
+                                      read: Opt<bool>|
+                      -> Value<'js> {
+                    let st = hs.clone();
+                    let sid = hs2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let s = session.escalate_lite().await?;
+                        match s {
+                            Session::Cdp(c) => {
+                                c.page
+                                    .human()
+                                    .scroll_by(by, read.0.unwrap_or(false))
+                                    .await?;
+                                put_session(&st, &sid, Session::Cdp(c));
+                                anyhow::Ok(serde_json::json!(true))
+                            }
+                            _ => anyhow::bail!("human input needs the browser engine"),
+                        }
+                    });
+                    finish(&ctx, out)
+                });
+            }
+            // warmup()
+            {
+                let hs = h_st.clone();
+                let hs2 = h_sid.clone();
+                hset!("warmup", move |ctx: Ctx<'js>| -> Value<'js> {
+                    let st = hs.clone();
+                    let sid = hs2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let s = session.escalate_lite().await?;
+                        match s {
+                            Session::Cdp(c) => {
+                                c.page.human().warmup(3, 1, 600).await?;
+                                put_session(&st, &sid, Session::Cdp(c));
+                                anyhow::Ok(serde_json::json!(true))
+                            }
+                            _ => anyhow::bail!("human input needs the browser engine"),
+                        }
+                    });
+                    finish(&ctx, out)
+                });
+            }
+            // hold(sel, ms)
+            {
+                let hs = h_st.clone();
+                let hs2 = h_sid.clone();
+                hset!("hold", move |ctx: Ctx<'js>,
+                                    sel: String,
+                                    ms: f64|
+                      -> Value<'js> {
+                    let st = hs.clone();
+                    let sid = hs2.clone();
+                    let rt = st.rt.clone();
+                    let out = rt.block_on(async move {
+                        let session = take_session(&st, &sid).map_err(anyhow::Error::msg)?;
+                        let s = session.escalate_lite().await?;
+                        match s {
+                            Session::Cdp(c) => {
+                                c.page.human().hold(&sel, ms as u64, 8).await?;
+                                put_session(&st, &sid, Session::Cdp(c));
+                                anyhow::Ok(serde_json::json!(true))
+                            }
+                            _ => anyhow::bail!("human input needs the browser engine"),
+                        }
+                    });
+                    finish(&ctx, out)
+                });
+            }
+            obj.set("human", human.into_value())?;
+        }
+
         obj.set(
             "close",
             Func::from(move |ctx: Ctx<'js>| -> Value<'js> {

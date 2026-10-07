@@ -520,3 +520,196 @@ fn extract_key(url: &str, kind: &str) -> Option<String> {
         _ => None,
     }
 }
+
+/// Clearance cookies per vendor — engage() waits for one of these.
+fn clearance_cookies(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "turnstile" | "cloudflare" => &["cf_clearance"],
+        "px" | "perimeterx" => &["_px3", "_pxhd"],
+        _ => &[],
+    }
+}
+
+async fn is_cleared(page: &std::sync::Arc<Page>, kind: &str) -> bool {
+    let cookies = page.cookies().await.unwrap_or_default();
+    let names: Vec<String> = cookies.iter().map(|c| c.name.clone()).collect();
+    clearance_cookies(kind)
+        .iter()
+        .any(|k| names.iter().any(|n| n == k))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngageResult {
+    pub kind: Option<String>,
+    pub acted: Vec<String>,
+    pub cleared: bool,
+    pub token_present: bool,
+    pub ms: u128,
+    pub timeout: bool,
+}
+
+/// Engage an interactive challenge where the widget is locally solvable:
+/// Turnstile-style checkbox -> human click; PX-style press&hold -> tremor
+/// hold; generic verify buttons -> human click. Then wait for clearance
+/// (cookie) or a populated token field.
+///
+/// Honest scope: this solves the *behavioural* part. IP reputation and
+/// image-grid puzzles are out of scope everywhere (see README).
+pub async fn engage(
+    page: &std::sync::Arc<Page>,
+    timeout: Duration,
+    human: bool,
+) -> Result<EngageResult> {
+    use crate::human::Human;
+    let t0 = Instant::now();
+    let info = detect_once(page).await?;
+    let kind = info.kind.clone().unwrap_or_default();
+    let mut acted: Vec<String> = vec![];
+    let h = Human::new(page.clone());
+
+    let centre = |sels: Vec<&'static str>| {
+        let page = page.clone();
+        async move {
+            for sel in sels {
+                let expr = format!(
+                    "(function(){{ var e = document.querySelector({}); if (!e) return null; var r = e.getBoundingClientRect(); return {{ x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width }}; }})()",
+                    serde_json::to_string(sel).unwrap()
+                );
+                if let Ok(r) = page.eval(&expr).await
+                    && r.get("w").and_then(Value::as_f64).unwrap_or(0.0) > 0.0
+                {
+                    return Some((
+                        r.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+                        r.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+                    ));
+                }
+            }
+            None
+        }
+    };
+
+    match kind.as_str() {
+        "turnstile" => {
+            // the checkbox renders inside the widget's iframe — click the
+            // iframe centre, never the (full-width) wrapper div
+            if let Some((x, y)) = centre(vec![
+                "#turnstile-wrapper iframe",
+                ".cf-turnstile iframe",
+                "iframe[src*=\"challenges.cloudflare.com\"]",
+                "iframe[src*=\"turnstile\"]",
+                "#turnstile-wrapper",
+                ".cf-turnstile",
+            ])
+            .await
+            {
+                if human {
+                    let _ = h.move_to(x, y).await;
+                    let _ = h.click_at(x, y).await;
+                } else {
+                    let _ = page.mouse_click(x, y).await;
+                }
+                acted.push("turnstile-click".into());
+            }
+        }
+        "px" => {
+            if let Some((x, y)) = centre(vec!["#px-captcha", "[class*=\"px-captcha\"]"]).await {
+                if human {
+                    let _ = h.move_to(x, y).await;
+                    let _ = h.hold("#px-captcha", 10500, 8).await;
+                } else {
+                    let _ = page.mouse_click(x, y).await;
+                }
+                acted.push("px-press-hold".into());
+            }
+        }
+        _ => {}
+    }
+
+    if acted.is_empty()
+        && let Some((x, y)) = centre(vec![
+            "#challenge-stage button",
+            "button[type=\"submit\"]",
+            ".cf-button",
+        ])
+        .await
+    {
+        if human {
+            let _ = h.move_to(x, y).await;
+            let _ = h.click_at(x, y).await;
+        } else {
+            let _ = page.mouse_click(x, y).await;
+        }
+        acted.push("verify-click".into());
+    }
+
+    // wait for clearance: cookie present, or the token field populated
+    let mut cleared = is_cleared(page, &kind).await;
+    let mut token_present = false;
+    while t0.elapsed() < timeout {
+        cleared = is_cleared(page, &kind).await;
+        if cleared {
+            break;
+        }
+        if let Some(k) = info.kind.as_deref()
+            && let Some(w) = WIDGETS.iter().find(|w| w.kind == k)
+        {
+            let expr = format!(
+                "(function(){{ var sels = {}; for (var i = 0; i < sels.length; i++) {{ var e = document.querySelector(sels[i]); if (e && String(e.value || '').length > 8) return true; }} return false; }})()",
+                serde_json::to_string(&w.token_fields).unwrap()
+            );
+            token_present = page
+                .eval(&expr)
+                .await
+                .unwrap_or(Value::Bool(false))
+                .as_bool()
+                .unwrap_or(false);
+            if token_present {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    Ok(EngageResult {
+        kind: info.kind,
+        acted,
+        cleared,
+        token_present,
+        ms: t0.elapsed().as_millis(),
+        timeout: t0.elapsed() >= timeout,
+    })
+}
+
+/// One-shot navigate-through: goto → engage if challenged → reload on clearance.
+pub async fn goto_through(
+    page: &std::sync::Arc<Page>,
+    url: &str,
+    timeout: Duration,
+    human: bool,
+) -> Result<crate::cdp::page::Nav> {
+    use crate::cdp::page::WaitUntil;
+    let nav = page
+        .goto(
+            url,
+            crate::cdp::page::GotoOpts {
+                wait_until: Some(WaitUntil::Interactive),
+                timeout: Some(timeout),
+                referer: None,
+            },
+        )
+        .await?;
+    let info = detect_once(page).await?;
+    if info.kind.is_none() {
+        return Ok(nav); // not challenged — plain nav result
+    }
+    engage(page, timeout, human).await?;
+    // clearance granted (or attempted) → reload to get the real page
+    page.goto(
+        url,
+        crate::cdp::page::GotoOpts {
+            wait_until: Some(WaitUntil::Interactive),
+            timeout: Some(timeout),
+            referer: None,
+        },
+    )
+    .await
+}

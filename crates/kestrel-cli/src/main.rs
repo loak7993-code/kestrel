@@ -141,6 +141,9 @@ enum Cmd {
         wait: bool,
         #[arg(long, default_value = "20000")]
         timeout: u64,
+        /// click/solve the behavioural part of the widget, then wait for clearance
+        #[arg(long)]
+        engage: bool,
         #[arg(long)]
         proxy: Option<String>,
     },
@@ -446,15 +449,24 @@ async fn run_async(cli: Cli) -> Result<()> {
             url,
             wait,
             timeout,
+            engage,
             proxy,
         } => {
             let s =
                 kestrel_core::Session::open(&url, opts(timeout_nav(timeout), proxy, false)).await?;
-            let (s, info) = s
-                .detect_challenge(wait, std::time::Duration::from_millis(timeout))
-                .await?;
-            println!("{}", serde_json::to_string_pretty(&info)?);
-            s.close().await;
+            if engage {
+                let (s, res) = s
+                    .engage_challenge(std::time::Duration::from_millis(timeout), true)
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&res)?);
+                s.close().await;
+            } else {
+                let (s, info) = s
+                    .detect_challenge(wait, std::time::Duration::from_millis(timeout))
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&info)?);
+                s.close().await;
+            }
         }
         Cmd::Net {
             url,

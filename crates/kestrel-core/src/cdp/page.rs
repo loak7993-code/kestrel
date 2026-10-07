@@ -788,6 +788,24 @@ impl Page {
         Ok(res["result"]["value"].clone())
     }
 
+    /// Raw trusted click at coordinates.
+    pub async fn mouse_click(self: &Arc<Self>, x: f64, y: f64) -> Result<()> {
+        self.conn
+            .send(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1 }),
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        self.conn
+            .send(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1 }),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub fn url(&self) -> String {
         self.url.lock().unwrap().clone()
     }

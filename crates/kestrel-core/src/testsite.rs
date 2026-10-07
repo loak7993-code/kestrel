@@ -60,6 +60,29 @@ pub fn serve_on(listener: TcpListener) {
                 "setTimeout(()=>{document.getElementById('app').innerHTML='<h1>Rendered by JS</h1><p id=\"js-done\">spa content ready</p>'},300);".into(),
             ),
             "/setcookie" => ("200 OK", "text/html", "cookie set".into()),
+            "/challenge" => (
+                "200 OK",
+                "text/html",
+                "<!doctype html><html><head><title>Verify</title></head><body><h1>Verify you are human</h1>"
+                    .to_owned()
+                    + "<div id=\"turnstile-wrapper\" data-sitekey=\"0x4AAAAAAA\">"
+                    + "<iframe src=\"/cf-iframe.html\" width=\"300\" height=\"80\"></iframe></div>"
+                    + "<input name=\"cf-turnstile-response\" value=\"\">"
+                    + "<script>document.addEventListener('click', function(ev){"
+                    + "  if (ev.target.closest('.cf-check')) {"
+                    + "    document.querySelector('input[name=cf-turnstile-response]').value = 'tok_' + Date.now() + '_xxxxxx';"
+                    + "    document.cookie = 'cf_clearance=solved_' + Date.now() + '; path=/';"
+                    + "  } });</script></body></html>",
+            ),
+            "/cf-iframe.html" => (
+                "200 OK",
+                "text/html",
+                ("<!doctype html><html><body style=\"margin:0\"><div class=\"cf-check\" style=\"width:280px;height:60px;background:#faebd7;text-align:center;line-height:60px;cursor:pointer\">Verify checkbox</div>".to_owned()
+                    + "<script>document.addEventListener('click', function(){"
+                    + "  try { parent.document.querySelector('input[name=cf-turnstile-response]').value = 'tok_' + Date.now() + '_xxxxxx'; } catch (e) {}"
+                    + "  document.cookie = 'cf_clearance=solved_' + Date.now() + '; path=/';"
+                    + "});</script></body></html>"),
+            ),
             _ => ("404 Not Found", "text/html", "nope".into()),
         };
         let mut headers = format!(

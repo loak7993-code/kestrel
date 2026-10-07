@@ -57,8 +57,19 @@ if (k.needsJS(res)) {
 
 Full surface: `k.open/fetch/save/load/log/env/args/detect/exit`,
 page `title/url/goto/html/readable/text/extract/count/eval/wait/screenshot/
-pdf/cookies/close`, human input (`page.human.move/click/type/warmup/hold`),
-challenge helpers, pool (`k.Pool` via Rust; scripting uses sequential pages).
+pdf/cookies/clickAt/close`, human input — `page.human.move/click/type/scroll/
+warmup/hold` (seeded, reproducible) — and the challenge loop:
+
+```js
+const res = page.detectChallenge();          // { type, sitekey, visible, … }
+const engaged = page.engageChallenge(30000); // click the checkbox / hold /
+                                             // wait for clearance + token
+if (engaged.cleared) page.goto(page.url());  // reload → the real page
+```
+
+Cookie carry-over is real: a lite `k.fetch` sees `set-cookie` headers, and the
+escalated browser session starts with that jar applied before its first
+navigation.
 
 ## CLI
 
@@ -114,11 +125,13 @@ shadow-`wait`, `waitExpr`), extraction, eval, screenshots (viewport/full/
 element), PDFs, cookies, human input, stealth profiles, challenge detection +
 token waiting, network capture + HAR, pool, CLI + scripts + REPL.
 
-Not in v1: challenge *engage* (interactive solving), drag&drop/file upload/
-workers/screencast video/virtual clock, proxy auth forwarder, accounts/
-identity tooling, plugin loader for scripts (host closures are Rust-side for
-now). The framework is standalone — it shares no code with velox; where the
-two overlap, the semantics were written fresh (stealth profiles, in-page
-engine) or ported with the same lessons applied (transport, discovery).
+Not in v1: drag&drop/file upload/workers/screencast video/virtual clock,
+proxy auth forwarder, accounts/identity tooling, plugin loader for scripts
+(host closures are Rust-side for now). Challenge engage covers the
+behavioural layer (checkbox/press-hold/verify-button + clearance wait); IP
+reputation and image-grid puzzles are out of scope in every framework. The
+framework is standalone — it shares no code with velox; where the two
+overlap, the semantics were written fresh (stealth profiles, in-page engine)
+or ported with the same lessons applied (transport, discovery).
 
 MIT.

@@ -383,6 +383,34 @@ impl Session {
         }
     }
 
+    /// Engage an interactive challenge (escalates lite → cdp).
+    pub async fn engage_challenge(
+        self,
+        timeout: Duration,
+        human: bool,
+    ) -> Result<(Session, cdp::challenge::EngageResult)> {
+        let s = self.escalate_lite().await?;
+        match s {
+            Session::Cdp(s) => {
+                let r = cdp::challenge::engage(&s.page, timeout, human).await?;
+                Ok((Session::Cdp(s), r))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Navigate through a challenge: goto → engage → reload on clearance.
+    pub async fn goto_through(self, url: &str, timeout: Duration) -> Result<(Session, Nav)> {
+        let s = self.escalate_lite().await?;
+        match s {
+            Session::Cdp(s) => {
+                let nav = cdp::challenge::goto_through(&s.page, url, timeout, true).await?;
+                Ok((Session::Cdp(s), nav))
+            }
+            _ => unreachable!(),
+        }
+    }
+
     pub async fn netlog(self, filter: Option<&str>) -> Result<(Session, Vec<RequestEntry>)> {
         let s = self.escalate_lite().await?;
         match s {
@@ -472,7 +500,7 @@ impl CdpSession {
             })
             .await?;
         if let Some(l) = lite {
-            let cookies = cookies_from_headers(&l.res.url, &l.res.headers);
+            let cookies = cookies_from_headers(&l.res.url, &l.res.set_cookies);
             if !cookies.is_empty() {
                 let _ = page.set_cookies(cookies).await;
             }
@@ -502,11 +530,64 @@ impl CdpSession {
     }
 }
 
-/// set-cookie headers → cookie list for the browser jar.
-fn cookies_from_headers(
-    url: &str,
-    headers: &std::collections::HashMap<String, String>,
-) -> Vec<Cookie> {
-    let _ = (url, headers);
-    vec![] // the cookie jar lives in the reqwest client; session replay rides storageState
+/// set-cookie values from the lite fetch → cookies for the browser jar.
+/// The hybrid-pipeline hand-off: the lite engine's cookie state carries over
+/// to the escalated browser session BEFORE its first navigation.
+fn cookies_from_headers(url: &str, set_cookies: &[String]) -> Vec<Cookie> {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_default();
+    let mut out = vec![];
+    for raw in set_cookies {
+        let mut parts = raw.split(';');
+        let (Some(pair), attrs) = (parts.next(), parts) else {
+            continue;
+        };
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let mut c = Cookie {
+            name: name.to_string(),
+            value: value.trim().to_string(),
+            domain: if host.is_empty() {
+                String::new()
+            } else {
+                format!(".{host}")
+            },
+            path: "/".to_string(),
+            expires: None,
+            http_only: false,
+            secure: false,
+            same_site: None,
+        };
+        for a in attrs {
+            let a = a.trim();
+            let lower = a.to_ascii_lowercase();
+            if let Some(p) = lower.strip_prefix("path=") {
+                if !p.is_empty() {
+                    c.path = a[5..].to_string();
+                }
+            } else if lower == "httponly" {
+                c.http_only = true;
+            } else if lower == "secure" {
+                c.secure = true;
+            } else if let Some(_exp) = lower.strip_prefix("expires=") {
+                // best-effort: httpdate parse
+                if let Ok(t) = httpdate::parse_http_date(a[8..].trim()) {
+                    let secs = t
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as f64)
+                        .unwrap_or(0.0);
+                    c.expires = Some(secs);
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
 }

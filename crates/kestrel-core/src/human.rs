@@ -167,6 +167,16 @@ impl Human {
         tokio::time::sleep(Duration::from_millis(2)).await; // let the wire breathe
     }
 
+    /// Click at raw coordinates the human way: move, dwell, press, hold, release.
+    pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
+        self.move_to(x, y).await?;
+        self.pause(50.0, 180.0).await;
+        self.dispatch_button("mousePressed", x, y, "left", 1).await;
+        self.pause(40.0, 130.0).await;
+        self.dispatch_button("mouseReleased", x, y, "left", 1).await;
+        Ok(())
+    }
+
     async fn dispatch_button(&self, kind: &str, x: f64, y: f64, button: &str, clicks: i32) {
         self.page.conn.fire(
             "Input.dispatchMouseEvent",

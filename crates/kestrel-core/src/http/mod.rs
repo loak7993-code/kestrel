@@ -14,6 +14,8 @@ pub struct LiteResponse {
     pub start_url: String,
     pub status: u16,
     pub headers: std::collections::HashMap<String, String>,
+    /// every set-cookie value, uncollapsed (the cookie-carry-over path)
+    pub set_cookies: Vec<String>,
     pub body: bytes::Bytes,
     pub ms: u128,
 }
@@ -78,12 +80,19 @@ pub async fn fetch(client: &reqwest::Client, url: &str, opts: &LiteOpts) -> Resu
             value.to_str().unwrap_or("").to_string(),
         );
     }
+    let set_cookies = res
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(String::from))
+        .collect();
     let body = res.bytes().await.map_err(|e| anyhow!("{url}: body {e}"))?;
     Ok(LiteResponse {
         url: final_url,
         start_url,
         status,
         headers,
+        set_cookies,
         body,
         ms: start.elapsed().as_millis(),
     })
